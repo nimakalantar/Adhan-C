@@ -1,46 +1,37 @@
-/*
- * Created by stormcaster on 22/06/17.
- */
-
-
+#include "solar_coordinates.h"
+#include "astronomical.h"
+#include "calendrical_helper.h"
+#include "double_utils.h"
+#include <math.h>
 #include <stdlib.h>
-#include "include/solar_coordinates.h"
-#include "include/calendrical_helper.h"
-#include "include/astronomical.h"
-#include "math.h"
-#include "include/double_utils.h"
 
-solar_coordinates_t new_solar_coordinates(double julianDay){
+solar_coordinates_t new_solar_coordinates(double julian_day) {
+  double T = julian_century(julian_day);
+  double L0 = mean_solar_longitude(T);
+  double Lp = mean_lunar_longitude(T);
+  double omega = ascending_lunar_node_longitude(T);
+  double lambda = to_radians(apparent_solar_longitude(T, L0));
 
-    double T = julianCentury(julianDay);
-    double L0 = meanSolarLongitude(/* julianCentury */ T);
-    double Lp = meanLunarLongitude(/* julianCentury */ T);
-    double omega = ascendingLunarNodeLongitude(/* julianCentury */ T);
-    double lambda = to_radius(
-            apparentSolarLongitude(/* julianCentury*/ T, /* meanLongitude */ L0));
+  double theta0 = mean_sidereal_time(T);
+  double delta_psi = nutation_in_longitude(T, L0, Lp, omega);
+  double delta_epsilon = nutation_in_obliquity(T, L0, Lp, omega);
 
-    double theta0 = meanSiderealTime(/* julianCentury */ T);
-    double delta_psi = nutationInLongitude(/* julianCentury */ T, /* solarLongitude */ L0,
-            /* lunarLongitude */ Lp, /* ascendingNode */ omega);
-    double delta_epsilon = nutationInObliquity(/* julianCentury */ T, /* solarLongitude */ L0,
-            /* lunarLongitude */ Lp, /* ascendingNode */ omega);
+  double epsilon0 = mean_obliquity_of_the_ecliptic(T);
+  double epsilonapp =
+      to_radians(apparent_obliquity_of_the_ecliptic(T, epsilon0));
 
-    double epsilon0 = meanObliquityOfTheEcliptic(/* julianCentury */ T);
-    double epsilonapp = to_radius(apparentObliquityOfTheEcliptic(
-            /* julianCentury */ T, /* meanObliquityOfTheEcliptic */ epsilon0));
+  /* Equation from Astronomical Algorithms page 165 */
+  double declination = to_degrees(safe_asin(sin(epsilonapp) * sin(lambda)));
 
-    /* Equation from Astronomical Algorithms page 165 */
-    double declination = to_degrees(asin(sin(epsilonapp) * sin(lambda)));
+  /* Equation from Astronomical Algorithms page 165 */
+  double rightAscension = unwind_angle(
+      to_degrees(safe_atan2(cos(epsilonapp) * sin(lambda), cos(lambda))));
 
-    /* Equation from Astronomical Algorithms page 165 */
-    double rightAscension = unwind_angle(
-            to_degrees(atan2(cos(epsilonapp) * sin(lambda), cos(lambda))));
+  /* Equation from Astronomical Algorithms page 88 */
+  double apparentSiderealTime =
+      theta0 +
+      (((delta_psi * 3600) * cos(to_radians(epsilon0 + delta_epsilon))) / 3600);
 
-    /* Equation from Astronomical Algorithms page 88 */
-    double apparentSiderealTime = theta0 + (((delta_psi * 3600) * cos(to_radius(epsilon0 + delta_epsilon))) / 3600);
-
-
-    solar_coordinates_t solar_coordinates = (solar_coordinates_t) {declination, rightAscension, apparentSiderealTime};
-
-    return solar_coordinates;
+  return (solar_coordinates_t){declination, rightAscension,
+                               apparentSiderealTime};
 }

@@ -1,38 +1,66 @@
-/*
- * Created by stormcaster on 22/06/17.
- */
+#include "calendrical_helper.h"
+#include <math.h>
 
+double _julian_day(int year, int month, int day, double hours) {
+  /* Equation from Astronomical Algorithms page 60 */
 
-#include "include/calendrical_helper.h"
+  // NOTE: Integer conversion is done intentionally for the purpose of decimal
+  // truncation
+  int Y = month > 2 ? year : year - 1;
+  int M = month > 2 ? month : month + 12;
+  double D = day + (hours / 24);
 
-double _julianDay(int year, int month, int day, double hours) {
-    /* Equation from Astronomical Algorithms page 60 */
+  int A = Y / 100;
+  int B = 2 - A + (A / 4);
 
-    // NOTE: Integer conversion is done intentionally for the purpose of decimal truncation
-
-    int Y = month > 2 ? year : year - 1;
-    int M = month > 2 ? month : month + 12;
-    double D = day + (hours / 24);
-
-    int A = Y/100;
-    int B = 2 - A + (A/4);
-
-    int i0 = (int) (365.25 * (Y + 4716));
-    int i1 = (int) (30.6001 * (M + 1));
-    return i0 + i1 + D + B - 1524.5;
+  int i0 = (int)(365.25 * (Y + 4716));
+  int i1 = (int)(30.6001 * (M + 1));
+  return i0 + i1 + D + B - 1524.5;
 }
 
-double julianDay(int year, int month, int day) {
-    return _julianDay(year, month, day, 0.0);
+double julian_day(int year, int month, int day) {
+  return _julian_day(year, month, day, 0.0);
 }
 
-double julianDay2(const struct tm* date) {
-    return _julianDay(date->tm_year + 1900,
-                     date->tm_mon + 1, date->tm_mday,
-                     date->tm_hour + date->tm_min / 60.0);
+double julian_day_from_time_t(const time_t when) {
+  struct tm *date = gmtime(&when);
+  return _julian_day(date->tm_year + 1900, date->tm_mon + 1, date->tm_mday,
+                     date->tm_hour + date->tm_min / 60.0 +
+                         date->tm_sec / 3600.0);
 }
 
-double julianCentury(double JD) {
-    /* Equation from Astronomical Algorithms page 163 */
-    return (JD - 2451545.0) / 36525;
+double julian_century(double JD) {
+  /* Equation from Astronomical Algorithms page 163 */
+  return (JD - 2451545.0) / 36525;
+}
+
+bool is_leap_year(int year) {
+  return year % 4 == 0 && !(year % 100 == 0 && year % 400 != 0);
+}
+
+time_t add_seconds(const time_t when, int amount) { return when + amount; }
+
+time_t add_minutes(const time_t when, int amount) {
+  return add_seconds(when, amount * 60);
+}
+
+time_t add_hours(const time_t when, int amount) {
+  return add_minutes(when, amount * 60);
+}
+
+time_t add_days(const time_t when, int amount) {
+  return add_hours(when, amount * 24);
+}
+
+time_t date_from_time(const time_t time) {
+  struct tm tm_date = *gmtime(&time);
+  tm_date.tm_hour = 0;
+  tm_date.tm_min = 0;
+  tm_date.tm_sec = 0;
+  // Portable UTC time conversion - avoid timegm which isn't available everywhere
+  time_t result = mktime(&tm_date);
+  // mktime assumes local time, so we need to adjust for the difference
+  struct tm *gmt = gmtime(&result);
+  time_t offset = mktime(gmt) - result;
+  return result - offset;
 }

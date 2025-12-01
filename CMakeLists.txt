@@ -1,47 +1,89 @@
-PROJECT(adhan)
-SET(CMAKE_PROJECT_NAME adhan)
+cmake_minimum_required(VERSION 3.14)
 
-CMAKE_MINIMUM_REQUIRED(VERSION 3.5)
+project(adhan VERSION 1.0.1 LANGUAGES C CXX)
 
-# Mode debug par defaut
-IF("${CMAKE_BUILD_TYPE}" STREQUAL "")
-    SET(CMAKE_BUILD_TYPE "DEBUG")
-    ADD_DEFINITIONS(-DNOSYSLOG=1)
-ENDIF("${CMAKE_BUILD_TYPE}" STREQUAL "")
+# Set C standard to C17 (modern standard)
+set(CMAKE_C_STANDARD 17)
+set(CMAKE_C_STANDARD_REQUIRED ON)
+set(CMAKE_C_EXTENSIONS OFF)
 
-IF("${CMAKE_BUILD_TYPE}" STREQUAL "DEBUG")
-    SET(FORMAT_CODE style)
-ENDIF("${CMAKE_BUILD_TYPE}" STREQUAL "DEBUG")
+# Enable more comprehensive warnings
+if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
+    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wall -Wextra -Wpedantic -Wstrict-prototypes -Wmissing-prototypes")
+endif()
 
+# Set default build type
+if(NOT CMAKE_BUILD_TYPE)
+    set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
+endif()
 
+# Debug flags
+set(CMAKE_C_FLAGS_DEBUG "-g -O0 -DDEBUG")
+set(CMAKE_C_FLAGS_RELEASE "-O3 -DNDEBUG")
 
-SET(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=gnu++11")
-SET(CMAKE_C_FLAGS_RELEASE "-O2 -DNDEBUG")
-SET(CMAKE_CXX_FLAGS_RELEASE "-O2 -DNDEBUG")
-SET(CMAKE_C_FLAGS_DEBUG " -DDEBUG ")
-SET(CMAKE_CXX_FLAGS_DEBUG " -DDEBUG")
-SET(CPACK_SOURCE_IGNORE_FILES "/build.*/;/deb/;/CVS/;/\\\\.svn/;/\\\\.git/;\\\\.swp$;/*~;tags;\\\\.pcs$;")
+add_library(adhan STATIC
+    src/astronomical.c
+    src/solar_coordinates.c
+    src/solar_time.c
+    src/calculation_parameters.c
+    src/prayer_times.c
+    src/calendrical_helper.c
+)
 
-SET(MAJOR 1)
-SET(MINOR 0)
-SET(PATCH 1)
-SET(VERSION ${MAJOR}.${MINOR}.${PATCH})
+# Set target-specific properties
+target_compile_features(adhan PUBLIC c_std_17)
 
-#ADD_DEFINITIONS("-fgnu89-inline")
+# Add compile options for better code quality
+target_compile_options(adhan PRIVATE
+    $<$<C_COMPILER_ID:GNU,Clang>:-Wall -Wextra -Wpedantic -Wstrict-prototypes -Wmissing-prototypes>
+    $<$<C_COMPILER_ID:MSVC>:/W4>
+)
 
-ADD_DEFINITIONS("-Wall -ggdb3  -Wfatal-errors")
-ADD_DEFINITIONS("-fno-builtin-malloc -fno-builtin-realloc -fno-builtin-calloc -fno-builtin-free -fno-strict-aliasing -fno-omit-frame-pointer")
-ADD_DEFINITIONS("-fstrict-aliasing")
+target_include_directories(adhan PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
+    $<INSTALL_INTERFACE:include>
+)
 
-#INCLUDE_DIRECTORIES(${CMAKE_CURRENT_SOURCE_DIR})
-#INCLUDE_DIRECTORIES(include)
+# Link math library on Unix-like systems
+target_link_libraries(adhan PUBLIC $<$<PLATFORM_ID:Linux,Darwin>:m>)
 
-# Executable for bidviser
-#ADD_EXECUTABLE(${CMAKE_PROJECT_NAME} ${ADAHN_SRC})
-#ADD_LIBRARY(${CMAKE_PROJECT_NAME} STATIC ${SOURCE_FILES})
-  #TARGET_LINK_LIBRARIES(${CMAKE_PROJECT_NAME}  m  )
+# Build example binary
+add_executable(example src/example.c)
+target_link_libraries(example PRIVATE adhan)
 
+include(CTest)
+enable_testing()
 
-add_subdirectory(src)
-add_subdirectory(test)
-#add_subdirectory(it)
+# Use FetchContent for GoogleTest
+include(FetchContent)
+FetchContent_Declare(
+    googletest
+    GIT_REPOSITORY https://github.com/google/googletest.git
+    GIT_TAG main
+)
+FetchContent_MakeAvailable(googletest)
+
+set(test_SRCS
+    test/Test.cpp
+    test/astronomical_test.cpp
+    test/double_utils_test.cpp
+    test/calculation_method_test.cpp
+    test/calculation_parameters_test.cpp
+    test/prayer_times_test.cpp
+)
+
+add_executable(runUnitTests ${test_SRCS})
+add_dependencies(runUnitTests adhan)
+
+target_compile_options(runUnitTests PRIVATE -fpermissive)
+
+target_link_libraries(runUnitTests
+    PRIVATE
+        gtest
+        gmock
+        adhan
+        m
+)
+
+include(GoogleTest)
+gtest_discover_tests(runUnitTests)

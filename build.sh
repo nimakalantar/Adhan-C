@@ -3,10 +3,13 @@
 set -e
 set -v
 
-test -d .repo/DownloadProject || git clone https://github.com/Crascit/DownloadProject.git .repo/DownloadProject
-
 rm -rf build
-mkdir build
-cd build
-cmake ..
-make -j
+
+# Configure with CMake, optionally set build type (default is Debug)
+cmake -DCMAKE_BUILD_TYPE=Debug -S . -B build
+
+# Build with all available cores
+cmake --build build
+
+# Run unit tests
+./build/runUnitTests

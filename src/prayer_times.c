@@ -1,298 +1,391 @@
-/*
- * Created by stormcaster on 22/06/17.
- */
+#include "prayer_times.h"
+#include "calculation_parameters.h"
+#include "calendrical_helper.h"
+#include "solar_time.h"
+#include <errno.h>
+#include <float.h>
+#include <math.h>
+#include <stddef.h>
+#include <stdint.h>
 
+static time_t time_from_double(double value, time_t date) {
+  // Check for invalid double values (NaN, infinity, or extreme values)
+  if (value != value || value == DBL_MAX || value == DBL_MIN ||
+      !isfinite(value)) {
+    return 0;
+  }
 
-#include <calculation_parameters.h>
-#include <prayer_times.h>
-#include "math.h"
-#include "include/prayer_times.h"
-#include "include/solar_time.h"
+  // Allow negative values and values >= 24.0 as they can represent times in
+  // adjacent days Only reject completely unreasonable values
+  if (value < -24.0 || value > 48.0) {
+    return 0;
+  }
 
-inline prayer_times_t
-new_prayer_times(coordinates_t *coordinates, date_components_t *date, calculation_parameters_t *params) {
-    return new_prayer_times2(coordinates, resolve_time(date), params);
+  time_t day = date_from_time(date);
+  if (day == 0) {
+    return 0; // date_from_time failed
+  }
+
+  int hours = (int)floor(value);
+  double minutes_double = (value - hours) * 60.0;
+  int minutes = (int)round(minutes_double);
+
+  // Handle negative hours (previous day)
+  if (hours < 0) {
+    day = add_days(day, -1);
+    hours += 24;
+  }
+
+  // Handle hours >= 24 (next day)
+  if (hours >= 24) {
+    day = add_days(day, 1);
+    hours -= 24;
+  }
+
+  // Handle minute overflow
+  if (minutes >= 60) {
+    hours += 1;
+    minutes = 0;
+    if (hours >= 24) {
+      day = add_days(day, 1);
+      hours = 0;
+    }
+  }
+
+  // Handle negative minutes
+  if (minutes < 0) {
+    hours -= 1;
+    minutes += 60;
+    if (hours < 0) {
+      day = add_days(day, -1);
+      hours = 23;
+    }
+  }
+
+  return add_seconds(add_minutes(add_hours(day, hours), minutes), 0);
 }
 
-prayer_times_t new_prayer_times2(coordinates_t *coordinates, time_t date, calculation_parameters_t *parameters) {
-    time_t tempFajr = 0;
-    time_t tempSunrise = 0;
-    time_t tempDhuhr = 0;
-    time_t tempAsr = 0;
-    time_t tempMaghrib = 0;
-    time_t tempIsha = 0;
+static bool validate_coordinates(const coordinates_t *coordinates) {
+  if (!coordinates)
+    return false;
+  return (coordinates->latitude >= -90.0 && coordinates->latitude <= 90.0 &&
+          coordinates->longitude >= -180.0 && coordinates->longitude <= 180.0);
+}
 
-    struct tm *tm_date = localtime(&date);
-    const int year = tm_date->tm_year + 1900;
-    const int dayOfYear = tm_date->tm_yday + 1;
+prayer_times_t new_prayer_times(coordinates_t *coordinates, time_t date,
+                                calculation_parameters_t *parameters) {
+  if (!validate_coordinates(coordinates) || !parameters) {
+    return (prayer_times_t)NULL_PRAYER_TIMES;
+  }
 
-    solar_time_t solar_time = new_solar_time(date, coordinates);
+  time_t tempFajr = 0;
+  time_t tempSunrise = 0;
+  time_t tempDhuhr = 0;
+  time_t tempAsr = 0;
+  time_t tempMaghrib = 0;
+  time_t tempIsha = 0;
+  time_t tempMidnight = 0;
 
-    time_components_t time_components;
-    time_components = from_double(solar_time.transit);
-    time_t transit = is_valid_time(time_components) ? get_date_components(date, &time_components) : 0;
+  struct tm *tm_date = gmtime(&date);
+  const int year = tm_date->tm_year + 1900;
+  const int dayOfYear = tm_date->tm_yday + 1;
 
-    time_components = from_double(solar_time.sunrise);
-    time_t sunriseComponents = is_valid_time(time_components) ? get_date_components(date, &time_components) : 0;
+  solar_time_t solar_time = new_solar_time(date, coordinates);
 
-    time_components = from_double(solar_time.sunset);
-    time_t sunsetComponents = is_valid_time(time_components) ? get_date_components(date, &time_components) : 0;
+  time_t transit = time_from_double(solar_time.transit, date);
+  time_t sunriseComponents = time_from_double(solar_time.sunrise, date);
+  time_t sunsetComponents = time_from_double(solar_time.sunset, date);
 
-    bool error = (transit == 0 || sunriseComponents == 0 || sunsetComponents == 0);
+  bool error =
+      (transit == 0 || sunriseComponents == 0 || sunsetComponents == 0);
 
-    if (!error) {
-        tempDhuhr = transit;
-        tempSunrise = sunriseComponents;
-        tempMaghrib = sunsetComponents;
+  if (!error) {
+    tempDhuhr = transit;
+    tempSunrise = sunriseComponents;
+    tempMaghrib = sunsetComponents;
 
-        time_components = from_double(afternoon(&solar_time, getShadowLength(parameters->madhab)));
-        if (is_valid_time(time_components)) {
-            tempAsr = get_date_components(date, &time_components);
-        }
+    time_t asr_time = time_from_double(
+        afternoon(&solar_time, getShadowLength(parameters->madhab)), date);
+    if (asr_time != 0) {
+      tempAsr = asr_time;
+    } else {
+      error = true; // Asr calculation failed
+    }
 
-        // get night length
-        time_t tomorrowSunrise = add_yday(sunriseComponents, 1);
-        long night = tomorrowSunrise * 1000 - sunsetComponents * 1000 ;
+    // Use the new function for Fajr calculation
+    tempFajr = calculate_fajr_time(coordinates, date, parameters);
+    if (tempFajr == 0) {
+      error = true; // Fajr calculation failed
+    }
 
-        time_components = from_double(
-                hourAngle(&solar_time, -parameters->fajrAngle, false));
-        if (is_valid_time(time_components)) {
-            tempFajr = get_date_components(date, &time_components);
-        }
+    // Isha calculation with check against safe value
+    if (parameters->ishaInterval > 0) {
+      tempIsha = add_minutes(tempMaghrib, parameters->ishaInterval);
+    } else {
+      time_t isha_time = time_from_double(
+          hour_angle(&solar_time, -parameters->ishaAngle, true), date);
+      if (isha_time != 0) {
+        tempIsha = isha_time;
+      }
 
-        if (parameters->method == MOON_SIGHTING_COMMITTEE && coordinates->latitude >= 55) {
-            time_t tmp_time = add_seconds(sunriseComponents, -1 * (int) (night / 7000));
-            tempFajr = tmp_time;
-        }
+      if (parameters->method == MOON_SIGHTING_COMMITTEE &&
+          coordinates->latitude >= 55) {
+        long night_length =
+            (add_days(sunriseComponents, 1) - sunsetComponents) / 60;
+        tempIsha = add_minutes(sunsetComponents, night_length * 0.4);
+      }
 
-        const night_portions_t nightPortions = get_night_portions(parameters);
+      const night_portions_t nightPortions = get_night_portions(parameters);
 
-        time_t safeFajr;
-        if (parameters->method == MOON_SIGHTING_COMMITTEE) {
-            safeFajr = seasonAdjustedMorningTwilight(coordinates->latitude, dayOfYear, year, sunriseComponents);
+      time_t safeIsha;
+      if (parameters->method == MOON_SIGHTING_COMMITTEE) {
+        safeIsha = seasonAdjustedEveningTwilight(
+            coordinates->latitude, dayOfYear, year, sunsetComponents);
+      } else {
+        long night = add_days(sunriseComponents, 1) - sunsetComponents;
+        long portion = (long)(nightPortions.isha * night);
+        safeIsha = add_seconds(sunsetComponents, portion);
+      }
+
+      if (!tempIsha || difftime(tempIsha, safeIsha) > 0) {
+        tempIsha = safeIsha;
+      }
+    }
+  }
+
+  // Midnight calculation - halfway between maghrib and next day's fajr
+  if (!error && tempMaghrib > 0) {
+    struct tm date_tm = *gmtime(&date);
+    date_tm.tm_mday += 1;
+    // Use portable UTC conversion instead of mktime (which assumes local time)
+    time_t temp_result = mktime(&date_tm);
+    struct tm *gmt = gmtime(&temp_result);
+    time_t offset = mktime(gmt) - temp_result;
+    time_t next_date = temp_result - offset;
+
+    if (next_date > 0) {
+      time_t tomorrowFajr =
+          calculate_fajr_time(coordinates, next_date, parameters);
+
+      if (tomorrowFajr > 0) {
+        time_t adjusted_maghrib =
+            add_minutes(tempMaghrib, parameters->adjustments.maghrib);
+        double midnight_seconds =
+            ((double)adjusted_maghrib + (double)tomorrowFajr) / 2.0;
+
+        // Validate the calculated midnight time
+        if (isfinite(midnight_seconds) && midnight_seconds > 0) {
+          tempMidnight = (time_t)midnight_seconds;
         } else {
-            double portion = nightPortions.fajr;
-            long nightFraction = (long) (portion * night / 1000);
-            safeFajr = add_seconds(sunriseComponents, -1 * (int) nightFraction);
+          // Fallback: set midnight to 6 hours after maghrib
+          tempMidnight = add_hours(tempMaghrib, 6);
         }
-
-        if (!tempFajr || difftime(safeFajr, tempFajr) > 0) {
-            tempFajr = safeFajr;
-        }
-
-        // Isha calculation with check against safe value
-        if (parameters->ishaInterval > 0) {
-            time_t tmp_time = add_seconds(tempMaghrib, parameters->ishaInterval * 60);
-            tempIsha = tmp_time;
-        } else {
-            time_components = from_double(hourAngle(&solar_time, -parameters->ishaAngle, true));
-            if (is_valid_time(time_components)) {
-                tempIsha = get_date_components(date, &time_components);
-            }
-
-            if (parameters->method == MOON_SIGHTING_COMMITTEE && coordinates->latitude >= 55) {
-                long nightFraction = night / 7000;
-                time_t tmp_time = add_seconds(sunsetComponents, (int) nightFraction);
-                tempIsha = tmp_time;
-            }
-
-            time_t safeIsha;
-            if (parameters->method == MOON_SIGHTING_COMMITTEE) {
-                safeIsha = seasonAdjustedEveningTwilight(coordinates->latitude, dayOfYear, year, sunsetComponents);
-            } else {
-                double portion = nightPortions.isha;
-                long nightFraction = (long) (portion * night / 1000);
-                safeIsha = add_seconds(sunsetComponents, (int) nightFraction);
-            }
-
-            if (!tempIsha || difftime(safeIsha, tempIsha) < 0) {
-                tempIsha = safeIsha;
-            }
-        }
-    }
-
-    // method based offsets
-    int dhuhrOffsetInMinutes;
-    if (parameters->method == MOON_SIGHTING_COMMITTEE) {
-        // Moonsighting Committee requires 5 minutes for the sun to pass
-        // the zenith and dhuhr to enter
-        dhuhrOffsetInMinutes = 5;
-    } else if (parameters->method == UMM_AL_QURA ||
-               parameters->method == GULF ||
-               parameters->method == QATAR) {
-        // UmmAlQura and derivatives don't add
-        // anything to zenith for dhuhr
-        dhuhrOffsetInMinutes = 0;
+      } else {
+        // Fallback if tomorrow's fajr calculation fails
+        tempMidnight = add_hours(tempMaghrib, 6);
+      }
     } else {
-        dhuhrOffsetInMinutes = 1;
+      // Fallback if date calculation fails
+      tempMidnight = add_hours(tempMaghrib, 6);
     }
+  }
 
-    int maghribOffsetInMinutes;
-    if (parameters->method == MOON_SIGHTING_COMMITTEE) {
-        // Moonsighting Committee adds 3 minutes to sunset time to account for light refraction
-        maghribOffsetInMinutes = 3;
-    } else {
-        maghribOffsetInMinutes = 0;
-
-    }
-
-    if (error || !tempAsr) {
-        // if we don't have all prayer times then initialization failed
-        return (prayer_times_t) NULL_PRAYER_TIMES;
-    } else {
-
-        time_t final_fajr_time = round_minute(add_minutes(tempFajr, parameters->adjustments.fajr));
-        time_t final_sunrise_time = round_minute(add_minutes(tempSunrise, parameters->adjustments.sunrise));
-        time_t final_dhuhr_time = round_minute(
-                add_minutes(tempDhuhr, parameters->adjustments.dhuhr + dhuhrOffsetInMinutes));
-        time_t final_asr_time = round_minute(add_minutes(tempAsr, parameters->adjustments.asr));
-        time_t final_maghrib_time = round_minute(
-                add_minutes(tempMaghrib, parameters->adjustments.maghrib + maghribOffsetInMinutes));
-        time_t final_isha_time = round_minute(add_minutes(tempIsha, parameters->adjustments.isha));
-
-        prayer_times_t prayer_times = {final_fajr_time, final_sunrise_time, final_dhuhr_time, final_asr_time,
-                                           final_maghrib_time, final_isha_time};
-        return prayer_times;
-    }
+  // Final validation - ensure we have all required prayer times
+  if (error || !tempFajr || !tempSunrise || !tempDhuhr || !tempAsr ||
+      !tempMaghrib || !tempIsha || !tempMidnight) {
+    // if we don't have all prayer times then initialization failed
+    return (prayer_times_t)NULL_PRAYER_TIMES;
+  } else {
+    return (prayer_times_t){
+        add_minutes(tempFajr, parameters->adjustments.fajr),
+        add_minutes(tempSunrise, parameters->adjustments.sunrise),
+        add_minutes(tempDhuhr, parameters->adjustments.dhuhr),
+        add_minutes(tempAsr, parameters->adjustments.asr),
+        add_minutes(tempMaghrib, parameters->adjustments.maghrib),
+        add_minutes(tempIsha, parameters->adjustments.isha),
+        add_minutes(tempMidnight, parameters->adjustments.midnight)};
+  }
 }
 
-prayer_times_t new_prayer_times_with_tz(coordinates_t* coordinates, time_t date, calculation_parameters_t* parameters, int tz){
-    prayer_times_t prayer_times = new_prayer_times2(coordinates, date, parameters);
-    prayer_times.fajr = add_hours(prayer_times.fajr, tz);
-    prayer_times.sunrise = add_hours(prayer_times.sunrise, tz);
-    prayer_times.dhuhr = add_hours(prayer_times.dhuhr, tz);
-    prayer_times.asr= add_hours(prayer_times.asr, tz);
-    prayer_times.maghrib= add_hours(prayer_times.maghrib, tz);
-    prayer_times.isha=  add_hours(prayer_times.isha, tz);
-    return prayer_times;
+prayer_t currentPrayer(prayer_times_t *prayer_times, time_t when) {
+  if (prayer_times->midnight - when <= 0) {
+    return MIDNIGHT;
+  } else if (prayer_times->isha - when <= 0) {
+    return ISHA;
+  } else if (prayer_times->maghrib - when <= 0) {
+    return MAGHRIB;
+  } else if (prayer_times->asr - when <= 0) {
+    return ASR;
+  } else if (prayer_times->dhuhr - when <= 0) {
+    return DHUHR;
+  } else if (prayer_times->sunrise - when <= 0) {
+    return SUNRISE;
+  } else if (prayer_times->fajr - when <= 0) {
+    return FAJR;
+  } else {
+    return NONE;
+  }
 }
 
-prayer_t currentPrayer2(prayer_times_t *prayer_times, time_t when) {
-    if (prayer_times->isha - when <= 0) {
-        return ISHA;
-    } else if (prayer_times->maghrib - when <= 0) {
-        return MAGHRIB;
-    } else if (prayer_times->asr - when <= 0) {
-        return ASR;
-    } else if (prayer_times->dhuhr - when <= 0) {
-        return DHUHR;
-    } else if (prayer_times->sunrise - when <= 0) {
-        return SUNRISE;
-    } else if (prayer_times->fajr - when <= 0) {
-        return FAJR;
-    } else {
-        return NONE;
-    }
-}
-
-prayer_t next_prayer2(prayer_times_t *prayer_times, time_t when) {
-    if (prayer_times->isha - when <= 0) {
-        return NONE;
-    } else if (prayer_times->maghrib - when <= 0) {
-        return ISHA;
-    } else if (prayer_times->asr - when <= 0) {
-        return MAGHRIB;
-    } else if (prayer_times->dhuhr - when <= 0) {
-        return ASR;
-    } else if (prayer_times->sunrise - when <= 0) {
-        return DHUHR;
-    } else if (prayer_times->fajr - when <= 0) {
-        return SUNRISE;
-    } else {
-        return FAJR;
-    }
+prayer_t next_prayer(prayer_times_t *prayer_times, time_t when) {
+  if (prayer_times->midnight - when <= 0) {
+    return NONE;
+  } else if (prayer_times->isha - when <= 0) {
+    return MIDNIGHT;
+  } else if (prayer_times->maghrib - when <= 0) {
+    return ISHA;
+  } else if (prayer_times->asr - when <= 0) {
+    return MAGHRIB;
+  } else if (prayer_times->dhuhr - when <= 0) {
+    return ASR;
+  } else if (prayer_times->sunrise - when <= 0) {
+    return DHUHR;
+  } else if (prayer_times->fajr - when <= 0) {
+    return SUNRISE;
+  } else {
+    return FAJR;
+  }
 }
 
 time_t timeForPrayer(prayer_times_t *prayer_times, prayer_t prayer) {
-    switch (prayer) {
-        case FAJR:
-            return prayer_times->fajr;
-        case SUNRISE:
-            return prayer_times->sunrise;
-        case DHUHR:
-            return prayer_times->dhuhr;
-        case ASR:
-            return prayer_times->asr;
-        case MAGHRIB:
-            return prayer_times->maghrib;
-        case ISHA:
-            return prayer_times->isha;
-        case NONE:
-            return 0;
-        default:
-            return 0;
-    }
+  switch (prayer) {
+  case FAJR:
+    return prayer_times->fajr;
+  case SUNRISE:
+    return prayer_times->sunrise;
+  case DHUHR:
+    return prayer_times->dhuhr;
+  case ASR:
+    return prayer_times->asr;
+  case MAGHRIB:
+    return prayer_times->maghrib;
+  case ISHA:
+    return prayer_times->isha;
+  case MIDNIGHT:
+    return prayer_times->midnight;
+  case NONE:
+    return 0;
+  default:
+    return 0;
+  }
 }
 
-time_t seasonAdjustedMorningTwilight(double latitude, int day, int year, time_t sunrise) {
-    const double a = 75 + ((28.65 / 55.0) * fabs(latitude));
-    const double b = 75 + ((19.44 / 55.0) * fabs(latitude));
-    const double c = 75 + ((32.74 / 55.0) * fabs(latitude));
-    const double d = 75 + ((48.10 / 55.0) * fabs(latitude));
+time_t seasonAdjustedMorningTwilight(double latitude, int day, int year,
+                                     time_t sunrise) {
+  const double a = 75 + ((28.65 / 55.0) * fabs(latitude));
+  const double b = 75 + ((19.44 / 55.0) * fabs(latitude));
+  const double c = 75 + ((32.74 / 55.0) * fabs(latitude));
+  const double d = 75 + ((48.10 / 55.0) * fabs(latitude));
 
-    double adjustment;
-    const int dyy = daysSinceSolstice(day, year, latitude);
-    if (dyy < 91) {
-        adjustment = a + (b - a) / 91.0 * dyy;
-    } else if (dyy < 137) {
-        adjustment = b + (c - b) / 46.0 * (dyy - 91);
-    } else if (dyy < 183) {
-        adjustment = c + (d - c) / 46.0 * (dyy - 137);
-    } else if (dyy < 229) {
-        adjustment = d + (c - d) / 46.0 * (dyy - 183);
-    } else if (dyy < 275) {
-        adjustment = c + (b - c) / 46.0 * (dyy - 229);
-    } else {
-        adjustment = b + (a - b) / 91.0 * (dyy - 275);
-    }
+  double adjustment;
+  const int dyy = daysSinceSolstice(day, year, latitude);
+  if (dyy < 91) {
+    adjustment = a + (b - a) / 91.0 * dyy;
+  } else if (dyy < 137) {
+    adjustment = b + (c - b) / 46.0 * (dyy - 91);
+  } else if (dyy < 183) {
+    adjustment = c + (d - c) / 46.0 * (dyy - 137);
+  } else if (dyy < 229) {
+    adjustment = d + (c - d) / 46.0 * (dyy - 183);
+  } else if (dyy < 275) {
+    adjustment = c + (b - c) / 46.0 * (dyy - 229);
+  } else {
+    adjustment = b + (a - b) / 91.0 * (dyy - 275);
+  }
 
-    return add_seconds(sunrise, -(int) round(adjustment * 60.0));
+  return add_seconds(sunrise, -(int)round(adjustment * 60.0));
 }
 
-time_t seasonAdjustedEveningTwilight(double latitude, int day, int year, time_t sunset) {
-    const double a = 75 + ((25.60 / 55.0) * fabs(latitude));
-    const double b = 75 + ((2.050 / 55.0) * fabs(latitude));
-    const double c = 75 - ((9.210 / 55.0) * fabs(latitude));
-    const double d = 75 + ((6.140 / 55.0) * fabs(latitude));
+time_t seasonAdjustedEveningTwilight(double latitude, int day, int year,
+                                     time_t sunset) {
+  const double a = 75 + ((25.60 / 55.0) * fabs(latitude));
+  const double b = 75 + ((2.050 / 55.0) * fabs(latitude));
+  const double c = 75 - ((9.210 / 55.0) * fabs(latitude));
+  const double d = 75 + ((6.140 / 55.0) * fabs(latitude));
 
-    double adjustment;
-    int dyy = daysSinceSolstice(day, year, latitude);
-    if (dyy < 91) {
-        adjustment = a + (b - a) / 91.0 * dyy;
-    } else if (dyy < 137) {
-        adjustment = b + (c - b) / 46.0 * (dyy - 91);
-    } else if (dyy < 183) {
-        adjustment = c + (d - c) / 46.0 * (dyy - 137);
-    } else if (dyy < 229) {
-        adjustment = d + (c - d) / 46.0 * (dyy - 183);
-    } else if (dyy < 275) {
-        adjustment = c + (b - c) / 46.0 * (dyy - 229);
-    } else {
-        adjustment = b + (a - b) / 91.0 * (dyy - 275);
-    }
+  double adjustment;
+  int dyy = daysSinceSolstice(day, year, latitude);
+  if (dyy < 91) {
+    adjustment = a + (b - a) / 91.0 * dyy;
+  } else if (dyy < 137) {
+    adjustment = b + (c - b) / 46.0 * (dyy - 91);
+  } else if (dyy < 183) {
+    adjustment = c + (d - c) / 46.0 * (dyy - 137);
+  } else if (dyy < 229) {
+    adjustment = d + (c - d) / 46.0 * (dyy - 183);
+  } else if (dyy < 275) {
+    adjustment = c + (b - c) / 46.0 * (dyy - 229);
+  } else {
+    adjustment = b + (a - b) / 91.0 * (dyy - 275);
+  }
 
-    return add_seconds(sunset, (int) round(adjustment * 60.0));
-
+  return add_seconds(sunset, (int)round(adjustment * 60.0));
 }
 
 int daysSinceSolstice(int dayOfYear, int year, double latitude) {
-    int daysSinceSolistice;
-    const int northernOffset = 10;
-    bool isLeapYear = is_leap_year(year);
-    const int southernOffset = isLeapYear ? 173 : 172;
-    const int daysInYear = isLeapYear ? 366 : 365;
+  int daysSinceSolistice;
+  const bool isLeapYear = is_leap_year(year);
+  const int northernOffset = 10;
+  const int southernOffset = isLeapYear ? 173 : 172;
+  const int daysInYear = isLeapYear ? 366 : 365;
 
-    if (latitude >= 0) {
-        daysSinceSolistice = dayOfYear + northernOffset;
-        if (daysSinceSolistice >= daysInYear) {
-            daysSinceSolistice = daysSinceSolistice - daysInYear;
-        }
-    } else {
-        daysSinceSolistice = dayOfYear - southernOffset;
-        if (daysSinceSolistice < 0) {
-            daysSinceSolistice = daysSinceSolistice + daysInYear;
-        }
+  if (latitude >= 0) {
+    daysSinceSolistice = dayOfYear + northernOffset;
+    if (daysSinceSolistice >= daysInYear) {
+      daysSinceSolistice = daysSinceSolistice - daysInYear;
     }
-    return daysSinceSolistice;
+  } else {
+    daysSinceSolistice = dayOfYear - southernOffset;
+    if (daysSinceSolistice < 0) {
+      daysSinceSolistice = daysSinceSolistice + daysInYear;
+    }
+  }
+  return daysSinceSolistice;
+}
 
+time_t calculate_fajr_time(coordinates_t *coordinates, time_t date,
+                           calculation_parameters_t *parameters) {
+  struct tm *tm_date = gmtime(&date);
+  const int year = tm_date->tm_year + 1900;
+  const int dayOfYear = tm_date->tm_yday + 1;
+
+  solar_time_t solar_time = new_solar_time(date, coordinates);
+
+  time_t sunriseComponents = time_from_double(solar_time.sunrise, date);
+  time_t sunsetComponents = time_from_double(solar_time.sunset, date);
+
+  bool error = (sunriseComponents == 0 || sunsetComponents == 0);
+
+  if (error)
+    return 0;
+
+  // get night length
+  time_t tomorrowSunrise = add_days(sunriseComponents, 1);
+  long night = tomorrowSunrise - sunsetComponents;
+
+  time_t fajr_time = time_from_double(
+      hour_angle(&solar_time, -parameters->fajrAngle, false), date);
+
+  if (parameters->method == MOON_SIGHTING_COMMITTEE &&
+      coordinates->latitude >= 55) {
+    fajr_time = add_seconds(sunriseComponents, -90 * 60);
+  }
+
+  const night_portions_t nightPortions = get_night_portions(parameters);
+
+  time_t safeFajr;
+  if (parameters->method == MOON_SIGHTING_COMMITTEE) {
+    safeFajr = seasonAdjustedMorningTwilight(coordinates->latitude, dayOfYear,
+                                             year, sunriseComponents);
+  } else {
+    long portion = (long)(nightPortions.fajr * night);
+    safeFajr = add_seconds(sunriseComponents, -portion);
+  }
+
+  // Use safeFajr if fajr_time is invalid, or if fajr_time is after sunrise
+  if (!fajr_time || difftime(fajr_time, sunriseComponents) > 0) {
+    fajr_time = safeFajr;
+  }
+
+  return fajr_time;
 }
